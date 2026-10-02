@@ -34,9 +34,32 @@ jobs:
 
       - name: Build release server (UI embedded; bundled FFmpeg 7.1)
         working-directory: server
+        run: cargo build --release --features ove-decode/bundled,ove-encode/bundled
+
+      # The binary takes no CLI args (any arg is ignored and the server starts),
+      # so a naive `--help` smoke-check would hang this job forever. Bounded
+      # start → probe → kill instead; verified against the local release binary.
+      - name: Smoke-check the binary (start → probe /api/version + UI root → kill)
+        working-directory: server
         run: |
-          cargo build --release --features ove-decode/bundled,ove-encode/bundled
-          ./target/release/ove-web --help || true
+          export OVE_WEB_PORT=18787 OVE_WEB_DATA=/tmp/ove-smoke
+          ./target/release/ove-web > /tmp/ove-smoke.log 2>&1 &
+          PID=$!
+          ok=""
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:18787/api/version > /tmp/ove-smoke-version.json; then ok=api; break; fi
+            sleep 0.5
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::release binary never answered /api/version"
+            cat /tmp/ove-smoke.log
+            kill "$PID" 2>/dev/null || true
+            exit 1
+          fi
+          curl -sf http://127.0.0.1:18787/ | head -c 120; echo
+          cat /tmp/ove-smoke-version.json; echo
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
 
       - name: Package + checksums + metadata
         working-directory: server
