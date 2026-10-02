@@ -1,0 +1,42 @@
+[package]
+name = "ove-web"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "OVE Studio web server — hosts the ove-engine headless session behind a local HTTP API and serves the web editor UI (engine client — zero engine code)."
+build = "build.rs"
+
+[lib]
+name = "ove_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ove-web"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+png = "0.17"
+uuid = { version = "1", features = ["v4"] }
+rust-embed = "8"
+mime_guess = "2"
+# Engine dependency: pinned by fetch-engine.sh to the recorded commit.
+# The engine repo is a read-only dependency; its crates are consumed exactly
+# as ove-cli/ove-mcp consume them (path deps into the checkout).
+ove-engine = { path = "engine-checkout/engine/ove-engine" }
+ove-time = { path = "engine-checkout/engine/ove-time" }
+ove-media = { path = "engine-checkout/engine/ove-media" }
+ove-timeline = { path = "engine-checkout/engine/ove-timeline" }
+ove-render = { path = "engine-checkout/engine/ove-render" }
+# direct deps so CI can enable the engine's own `bundled` FFmpeg feature
+# (pkg/feature syntax requires direct dependency entries):
+ove-decode = { path = "engine-checkout/engine/ove-decode" }
+ove-encode = { path = "engine-checkout/engine/ove-encode" }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+sha2 = "0.10"
+tempfile = "3"

@@ -1,0 +1,7 @@
+# build outputs
+server/target/
+server/web-dist/
+web/node_modules/
+server/engine-checkout/
+server/dist/
+*.log

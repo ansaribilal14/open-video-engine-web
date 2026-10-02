@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: single-binary release (server + embedded editor UI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install toolchain (clang, nasm, libclang)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev clang pkg-config nasm make
+
+      - name: Fetch engine at pinned commit
+        run: sh server/fetch-engine.sh
+
+      - name: Build editor UI
+        working-directory: web
+        run: npm ci && npm run build
+
+      - name: Build release server (UI embedded; bundled FFmpeg 7.1)
+        working-directory: server
+        run: |
+          cargo build --release --features ove-decode/bundled,ove-encode/bundled
+          ./target/release/ove-web --help || true
+
+      - name: Package + checksums + metadata
+        working-directory: server
+        run: |
+          mkdir -p dist
+          BIN=target/release/ove-web
+          strip "$BIN" || true
+          cp "$BIN" dist/ove-web-linux-x86_64
+          cat > dist/SHA256SUMS.txt <<EOF
+          $(sha256sum dist/ove-web-linux-x86_64 | cut -d' ' -f1)  ove-web-linux-x86_64
+          EOF
+          {
+            echo "tag: ${GITHUB_REF_NAME}"
+            echo "engine_pin: 06c92496f7051f15069663296ec51e88e170fe18"
+            echo "engine_repo: https://github.com/ansaribilal14/open-video-engine"
+            echo "server_crate: ove-web 0.1.0"
+            echo "ui: embedded (vite build of web/)"
+            echo "ffmpeg: bundled 7.1.x (LGPL configuration, engine ADR-024)"
+            echo "run: ./ove-web-linux-x86_64  →  http://127.0.0.1:8787/"
+            echo "env: OVE_WEB_DATA=<data-root> OVE_WEB_PORT=<port>"
+          } > dist/build-metadata.yml
+          sha256sum dist/build-metadata.yml | awk '{print $1"  build-metadata.yml"}' >> dist/SHA256SUMS.txt
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            server/dist/ove-web-linux-x86_64
+            server/dist/SHA256SUMS.txt
+            server/dist/build-metadata.yml
+          generate_release_notes: true

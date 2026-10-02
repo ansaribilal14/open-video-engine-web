@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  web-ui:
+    name: editor UI build (tsc + vite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build editor UI
+        working-directory: web
+        run: npm ci && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: server/web-dist
+          retention-days: 7
+
+  server:
+    name: server build + full-stack e2e (deterministic mpeg4 fixture)
+    runs-on: ubuntu-latest
+    needs: web-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: server/web-dist
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Ubuntu 24.04 ships FFmpeg 6.1 — the engine pins 7.1. Use the engine's
+      # own CI mechanism: ffmpeg-sys-next `bundled` compiles the pinned FFmpeg
+      # from source (ove-decode/ove-encode `bundled` features). ffmpeg CLI +
+      # nasm + libclang are still needed for fixtures and bindgen.
+      - name: Install toolchain (clang, nasm, ffmpeg CLI, libclang)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev clang pkg-config nasm ffmpeg make
+
+      - name: Fetch engine at pinned commit (read-only checkout)
+        run: sh server/fetch-engine.sh
+
+      - name: Server tests + full-stack e2e (bundled FFmpeg 7.1)
+        working-directory: server
+        run: |
+          cargo test --release --features ove-decode/bundled,ove-encode/bundled -- --nocapture
+
+      - name: Certified real-media gate (NASA source, optional)
+        env:
+          OVE_E2E_MEDIA: /tmp/source.mp4
+        run: |
+          # The certification-grade source (sha256 2d315daf…705f) is acquired
+          # out-of-band (see engine repo docs/REALWORLD_VALIDATION.md); when a
+          # cache artifact is attached to the run it is identity-gated and the
+          # H.264 typed-capability journey runs against it.
+          if [ -n "$OVE_TEST_MEDIA_CACHE" ] && [ -f "$OVE_TEST_MEDIA_CACHE" ]; then
+            cp "$OVE_TEST_MEDIA_CACHE" /tmp/source.mp4
+            sha256sum /tmp/source.mp4
+            cd server && cargo test --release --test e2e journey_h264_real_media --features ove-decode/bundled,ove-encode/bundled
+          else
+            echo "NASA media cache not attached this run — journey skipped (recorded, not hidden)"
+          fi
