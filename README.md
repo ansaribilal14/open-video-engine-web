@@ -41,6 +41,36 @@ Run:
 # env: OVE_WEB_DATA=<data-root>  OVE_WEB_PORT=<port>
 ```
 
+## Hosted UI (Netlify) — connect the hosted editor to YOUR local engine
+
+The editor UI is also served from <https://ove-studio.netlify.app>. The engine
+itself cannot run in a browser (libav is native code) — the hosted page is a
+remote control for an `ove-web` server that YOU run on your own machine.
+Cross-origin access is a deliberate, explicit opt-in:
+
+```sh
+# 1. start your local server, allowing the hosted page's origin:
+OVE_WEB_ALLOW_ORIGIN=https://ove-studio.netlify.app ./ove-web-linux-x86_64
+
+# 2. open the hosted editor pointed at your server:
+#    https://ove-studio.netlify.app/?server=http://localhost:8787
+#    (the override persists in localStorage; the "Use same-origin" button in
+#    the page's server panel resets it)
+```
+
+Security/behavior notes:
+- `OVE_WEB_ALLOW_ORIGIN` is OFF by default: unset ⇒ the server sends NO CORS
+  headers and behaves exactly like v0.1.0 (same-origin only).
+- The value is an exact-origin allowlist (comma-separated), or `*` for any
+  origin. The preflight also answers Chromium's Private Network Access
+  request (`Access-Control-Allow-Private-Network`) — required for a public
+  page to reach a loopback server — but only for already-allowed origins.
+- The server still binds 127.0.0.1 only. A hosted page can never reach
+  someone else's engine; it reaches the operator's own local one.
+- Exports are verified in-browser via SHA-256 before download; in hosted
+  mode downloads are fetched through the verified path so the browser
+  preserves the artifact's name.
+
 ## Build from source
 
 ```sh

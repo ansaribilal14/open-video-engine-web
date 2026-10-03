@@ -108,7 +108,7 @@ export default function ExportSheet({
     if (!result) return;
     setVerify({ state: "working" });
     try {
-      const r = await fetch(`/api/renders/${encodeURIComponent(result.file)}`);
+      const r = await fetch(api.apiPath(`/api/renders/${encodeURIComponent(result.file)}`));
       if (!r.ok) throw new Error(`download failed (HTTP ${r.status})`);
       const bytes = await r.arrayBuffer();
       const got = await sha256Hex(bytes);
@@ -122,12 +122,32 @@ export default function ExportSheet({
     }
   };
 
-  const doDownload = () => {
+  const doDownload = async () => {
     if (!result) return;
-    const a = document.createElement("a");
-    a.href = `/api/renders/${encodeURIComponent(result.file)}`;
-    a.download = result.file;
-    a.click();
+    const url = api.apiPath(`/api/renders/${encodeURIComponent(result.file)}`);
+    // Same-origin: the download attribute works directly. Hosted (cross-origin):
+    // browsers IGNORE a.download on cross-origin URLs — fetch to a blob so the
+    // artifact still saves under its real name.
+    if (api.sameOrigin) {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = result.file;
+      a.click();
+      return;
+    }
+    try {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`download failed (HTTP ${r.status})`);
+      const blob = await r.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = result.file;
+      a.click();
+      URL.revokeObjectURL(objectUrl);
+    } catch (e) {
+      window.open(url, "_blank", "noopener");
+    }
   };
 
   return (

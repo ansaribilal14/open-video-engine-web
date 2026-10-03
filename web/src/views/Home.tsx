@@ -22,15 +22,19 @@ export default function Home({
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [serverOnline, setServerOnline] = useState<boolean | null>(null);
+  const [serverInput, setServerInput] = useState(api.serverBase);
 
   const refresh = useCallback(async () => {
     try {
       const [list, v] = await Promise.all([api.listProjects(), api.getVersion()]);
       setProjects(list.projects);
       setVersion(v);
+      setServerOnline(true);
     } catch (e) {
       notify(`cannot reach the engine server: ${(e as Error).message}`, "error");
       setProjects([]);
+      setServerOnline(false);
     }
   }, [notify]);
 
@@ -94,6 +98,44 @@ export default function Home({
         <button className="btn text" onClick={onSettings}>Settings</button>
       </header>
       <main className="home">
+        {(!api.sameOrigin || serverOnline === false) && (
+          <div className="card server-card">
+            <div className="meta">
+              <div className="name">
+                {api.sameOrigin
+                  ? "Engine server: this page's origin"
+                  : `Engine server: ${api.serverBase}`}{" "}
+                <span className={serverOnline ? "dot ok" : "dot bad"}>
+                  {serverOnline === null ? "probing…" : serverOnline ? "connected" : "unreachable"}
+                </span>
+              </div>
+              <div className="sub">
+                The engine runs where the server runs. To use this hosted UI with
+                your local engine, start the ove-web binary with:{" "}
+                <code>OVE_WEB_ALLOW_ORIGIN={typeof window !== "undefined" ? window.location.origin : ""} ./ove-web</code>{" "}
+                and connect below (e.g. <code>http://localhost:8787</code>).
+              </div>
+            </div>
+            <div className="row" style={{ gap: 8 }}>
+              <input
+                className="field"
+                style={{ flex: 1 }}
+                placeholder="http://localhost:8787"
+                value={serverInput}
+                onChange={(e) => setServerInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && api.setServerBase(serverInput)}
+              />
+              <button className="btn primary" onClick={() => api.setServerBase(serverInput)}>
+                Connect
+              </button>
+              {!api.sameOrigin && (
+                <button className="btn text" onClick={() => api.setServerBase("")}>
+                  Use same-origin
+                </button>
+              )}
+            </div>
+          </div>
+        )}
         <div className="head">
           <h1>Projects</h1>
           <button

@@ -4,6 +4,50 @@
 
 import type { Rat } from "./rational";
 
+// ---------------------------------------------------------------------------
+// Server base — hosted-UI mode.
+//
+// This UI may be served from static hosting (e.g. Netlify) while the real
+// engine runs LOCALLY in the ove-web binary (libav cannot run in a browser —
+// ENGINE_INTEGRATION_AUDIT §2). The API base is resolved once per load:
+//   1. `?server=<url>` query param (wins; persisted to localStorage; empty
+//      value clears the override and returns to same-origin)
+//   2. previously saved value in localStorage ("ove.serverUrl")
+//   3. same-origin (the normal single-binary deployment)
+// A cross-origin server only works if it was started with OVE_WEB_ALLOW_ORIGIN
+// allowing this page's origin — a deliberate, documented opt-in (README).
+// ---------------------------------------------------------------------------
+function resolveServerBase(): string {
+  try {
+    const q = new URLSearchParams(window.location.search).get("server");
+    if (q !== null) {
+      const v = q.trim().replace(/\/+$/, "");
+      localStorage.setItem("ove.serverUrl", v);
+      return v;
+    }
+    const saved = localStorage.getItem("ove.serverUrl");
+    return saved ? saved.replace(/\/+$/, "") : "";
+  } catch {
+    return "";
+  }
+}
+
+export const serverBase: string = resolveServerBase();
+export const sameOrigin: boolean = serverBase === "";
+
+/// Prefix an API path with the configured server base.
+export function apiPath(path: string): string {
+  return serverBase + path;
+}
+
+/// Persist a new server base ("" = same-origin) and return to the bare page
+/// path so a stale `?server=` query param cannot override the saved value on
+/// the next load.
+export function setServerBase(url: string): void {
+  localStorage.setItem("ove.serverUrl", url.trim().replace(/\/+$/, ""));
+  window.location.assign(window.location.pathname);
+}
+
 export interface ProbeStream {
   kind: string;
   codec: string;
@@ -99,7 +143,7 @@ export async function getVersion(): Promise<{
   data_root: string;
   engine_busy: boolean;
 }> {
-  const r = await fetch("/api/version");
+  const r = await fetch(apiPath("/api/version"));
   return unwrap(r);
 }
 
@@ -114,7 +158,7 @@ export interface SettingsInfo {
 }
 
 export async function getSettings(): Promise<SettingsInfo> {
-  const r = await fetch("/api/settings");
+  const r = await fetch(apiPath("/api/settings"));
   return unwrap(r);
 }
 
@@ -126,12 +170,12 @@ export interface ProjectEntry {
 }
 
 export async function listProjects(): Promise<{ ok: true; projects: ProjectEntry[] }> {
-  const r = await fetch("/api/projects");
+  const r = await fetch(apiPath("/api/projects"));
   return unwrap(r);
 }
 
 export async function createProject(name: string): Promise<Shape> {
-  const r = await fetch("/api/projects/create", {
+  const r = await fetch(apiPath("/api/projects/create"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, tick: [48000, 1] }),
@@ -140,7 +184,7 @@ export async function createProject(name: string): Promise<Shape> {
 }
 
 export async function openProject(name: string): Promise<Shape> {
-  const r = await fetch("/api/projects/open", {
+  const r = await fetch(apiPath("/api/projects/open"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name }),
@@ -149,12 +193,12 @@ export async function openProject(name: string): Promise<Shape> {
 }
 
 export async function closeProject(): Promise<{ ok: true; closed: boolean }> {
-  const r = await fetch("/api/projects/close", { method: "POST" });
+  const r = await fetch(apiPath("/api/projects/close"), { method: "POST" });
   return unwrap(r);
 }
 
 export async function deleteProject(name: string): Promise<{ ok: true; deleted: string }> {
-  const r = await fetch("/api/projects/delete", {
+  const r = await fetch(apiPath("/api/projects/delete"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name }),
@@ -175,7 +219,7 @@ export function importMedia(
 ): Promise<Shape> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/media/import");
+    xhr.open("POST", apiPath("/api/media/import"));
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress(e.loaded, e.total);
     };
@@ -196,7 +240,7 @@ export function importMedia(
 }
 
 export async function addTrack(id: number): Promise<Shape> {
-  const r = await fetch("/api/track/add", {
+  const r = await fetch(apiPath("/api/track/add"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ id }),
@@ -207,12 +251,12 @@ export async function addTrack(id: number): Promise<Shape> {
 /// Current UI projection of the live document (engine-authoritative via
 /// state_hash — the client verifies after every mutation batch).
 export async function getShape(): Promise<Shape> {
-  const r = await fetch("/api/shape");
+  const r = await fetch(apiPath("/api/shape"));
   return unwrap(r);
 }
 
 export async function addClip(track: number, hash: string, duration: Rat, source_in: Rat): Promise<Shape> {
-  const r = await fetch("/api/clip/add", {
+  const r = await fetch(apiPath("/api/clip/add"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ track, hash, duration, source_in }),
@@ -221,7 +265,7 @@ export async function addClip(track: number, hash: string, duration: Rat, source
 }
 
 export async function splitClip(track: number, clip: number, at: Rat): Promise<Shape> {
-  const r = await fetch("/api/clip/split", {
+  const r = await fetch(apiPath("/api/clip/split"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ track, clip, at }),
@@ -230,7 +274,7 @@ export async function splitClip(track: number, clip: number, at: Rat): Promise<S
 }
 
 export async function resizeClip(track: number, clip: number, duration: Rat): Promise<Shape> {
-  const r = await fetch("/api/clip/resize", {
+  const r = await fetch(apiPath("/api/clip/resize"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ track, clip, duration }),
@@ -239,7 +283,7 @@ export async function resizeClip(track: number, clip: number, duration: Rat): Pr
 }
 
 export async function moveClip(clip: number, from: number, to: number, index: number): Promise<Shape> {
-  const r = await fetch("/api/clip/move", {
+  const r = await fetch(apiPath("/api/clip/move"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ clip, from, to, index }),
@@ -248,7 +292,7 @@ export async function moveClip(clip: number, from: number, to: number, index: nu
 }
 
 export async function removeClip(track: number, clip: number): Promise<Shape> {
-  const r = await fetch("/api/clip/remove", {
+  const r = await fetch(apiPath("/api/clip/remove"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ track, clip }),
@@ -257,17 +301,17 @@ export async function removeClip(track: number, clip: number): Promise<Shape> {
 }
 
 export async function undo(): Promise<Shape> {
-  const r = await fetch("/api/undo", { method: "POST" });
+  const r = await fetch(apiPath("/api/undo"), { method: "POST" });
   return unwrap(r);
 }
 
 export async function redo(): Promise<Shape> {
-  const r = await fetch("/api/redo", { method: "POST" });
+  const r = await fetch(apiPath("/api/redo"), { method: "POST" });
   return unwrap(r);
 }
 
 export function frameUrl(t: Rat, w: number, h: number): string {
-  return `/api/frame?num=${t[0]}&den=${t[1]}&w=${w}&h=${h}`;
+  return apiPath(`/api/frame?num=${t[0]}&den=${t[1]}&w=${w}&h=${h}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +326,7 @@ export type ExportStatus =
   | { ok: false; running: false; kind: string; message: string };
 
 export async function startCompositeExport(rate: Rat): Promise<ExportStart> {
-  const r = await fetch("/api/export/reencode", {
+  const r = await fetch(apiPath("/api/export/reencode"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ rate }),
@@ -291,7 +335,7 @@ export async function startCompositeExport(rate: Rat): Promise<ExportStart> {
 }
 
 export async function startSegmentExport(hash: string, start: Rat, end: Rat): Promise<ExportStart> {
-  const r = await fetch("/api/export/copy", {
+  const r = await fetch(apiPath("/api/export/copy"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ hash, start, end }),
@@ -300,11 +344,11 @@ export async function startSegmentExport(hash: string, start: Rat, end: Rat): Pr
 }
 
 export async function startWavExport(): Promise<ExportStart> {
-  const r = await fetch("/api/export/wav", { method: "POST" });
+  const r = await fetch(apiPath("/api/export/wav"), { method: "POST" });
   return unwrap(r);
 }
 
 export async function exportStatus(): Promise<ExportStatus> {
-  const r = await fetch("/api/export/status");
+  const r = await fetch(apiPath("/api/export/status"));
   return r.json();
 }

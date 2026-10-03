@@ -256,3 +256,10 @@ canvas.timeline { position: absolute; inset: 0; width: 100%; height: 100%; displ
 ul.limitations { padding-left: var(--space-lg); color: var(--on-surface-variant); }
 ul.limitations li { margin-bottom: var(--space-sm); }
 hr.sep { border: none; border-top: 1px solid var(--outline); margin: var(--space-md) 0; }
+
+/* Hosted-UI server panel (v0.1.1) */
+.server-card { border-color: var(--primary); }
+.server-card .sub code { font-family: var(--mono); font-size: 0.85em; color: var(--on-surface); word-break: break-all; }
+.dot { display: inline-block; font-size: 0.8em; padding: 0 6px; border-radius: 8px; vertical-align: middle; }
+.dot.ok { color: var(--tertiary); }
+.dot.bad { color: var(--error); }

@@ -17,7 +17,7 @@ use ove_render::OutputSpec;
 use ove_time::Rational;
 
 pub const ENGINE_PIN: &str = "06c92496f7051f15069663296ec51e88e170fe18";
-pub const SERVER_VERSION: &str = "0.1.0";
+pub const SERVER_VERSION: &str = "0.1.1";
 
 // ---------------------------------------------------------------------------
 // Typed error mapping (EngineError -> {kind, message}) — audit §8

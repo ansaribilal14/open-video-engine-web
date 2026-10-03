@@ -441,3 +441,105 @@ async fn boundary_guards() {
     assert_eq!(status, 400);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------------------
+// Hosted-UI CORS opt-in (v0.1.1) — real preflights over a live listener.
+// ---------------------------------------------------------------------------
+
+async fn spawn_server_with_cors(tag: &str, allowed: &[&str]) -> (String, std::path::PathBuf) {
+    let root = data_root(tag);
+    let st = std::sync::Arc::new(AppState::new(root.clone()));
+    let app = ove_web::cors::protect(
+        ove_web::api::router(st).merge(ove_web::api::ui_router()),
+        allowed.iter().map(|s| s.to_string()).collect(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    (format!("http://{addr}"), root)
+}
+
+#[tokio::test]
+async fn cors_opt_in_preflight_and_headers() {
+    let (base, root) =
+        spawn_server_with_cors("cors", &["https://editor.example"]).await;
+
+    let client = reqwest::Client::new();
+
+    // 1. Preflight from an ALLOWED origin (with a PNA request — Chromium
+    //    public→local pattern) ⇒ 200 + allow-origin + methods + PNA true.
+    let r = client
+        .request(reqwest::Method::OPTIONS, format!("{base}/api/version"))
+        .header("Origin", "https://editor.example")
+        .header("Access-Control-Request-Method", "GET")
+        .header("Access-Control-Request-Private-Network", "true")
+        .send()
+        .await
+        .expect("preflight");
+    assert_eq!(r.status(), 200, "preflight must not 405");
+    let h = r.headers();
+    assert_eq!(
+        h.get("access-control-allow-origin").and_then(|v| v.to_str().ok()),
+        Some("https://editor.example"),
+        "allow-origin echoes the allowed origin"
+    );
+    assert_eq!(
+        h.get("access-control-allow-methods").and_then(|v| v.to_str().ok()),
+        Some("GET, POST, OPTIONS")
+    );
+    assert_eq!(
+        h.get("access-control-allow-private-network").and_then(|v| v.to_str().ok()),
+        Some("true"),
+        "PNA opt-in answered only for allowed origins"
+    );
+
+    // 2. Preflight from a DISALLOWED origin ⇒ no allow headers (browser blocks).
+    let r = client
+        .request(reqwest::Method::OPTIONS, format!("{base}/api/version"))
+        .header("Origin", "https://evil.example")
+        .header("Access-Control-Request-Method", "GET")
+        .send()
+        .await
+        .expect("preflight");
+    assert_eq!(r.status(), 200);
+    assert!(r.headers().get("access-control-allow-origin").is_none());
+
+    // 3. Plain GET with an allowed Origin ⇒ response carries allow-origin.
+    let r = client
+        .get(format!("{base}/api/version"))
+        .header("Origin", "https://editor.example")
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.headers().get("access-control-allow-origin").and_then(|v| v.to_str().ok()),
+        Some("https://editor.example")
+    );
+
+    // 4. GET without Origin (same-origin navigation) ⇒ no CORS headers added.
+    let r = client.get(format!("{base}/api/version")).send().await.expect("get");
+    assert_eq!(r.status(), 200);
+    assert!(r.headers().get("access-control-allow-origin").is_none());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn cors_default_off_is_byte_identical() {
+    // Unset env ⇒ protect() is a no-op: even an "allowed-looking" origin
+    // gets no CORS headers (the v0.1.0 behavior is preserved exactly).
+    let (base, root) = spawn_server_with_cors("cors-off", &[]).await;
+    let client = reqwest::Client::new();
+    let r = client
+        .request(reqwest::Method::OPTIONS, format!("{base}/api/version"))
+        .header("Origin", "https://editor.example")
+        .header("Access-Control-Request-Method", "GET")
+        .send()
+        .await
+        .expect("preflight");
+    assert!(r.headers().get("access-control-allow-origin").is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}

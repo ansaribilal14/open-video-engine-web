@@ -23,7 +23,15 @@ async fn main() {
         .unwrap_or(8787);
 
     let st = Arc::new(AppState::new(data_root.clone()));
-    let app = api::router(st.clone()).merge(api::ui_router());
+    // Hosted-UI CORS opt-in (server/src/cors.rs): unset ⇒ byte-identical
+    // same-origin behavior; set ⇒ only the listed page origins may call.
+    let allowed = ove_web::cors::parse_allow_origins(
+        std::env::var("OVE_WEB_ALLOW_ORIGIN").ok().as_deref(),
+    );
+    if !allowed.is_empty() {
+        println!("  cors:      allowing origins: {}", allowed.join(", "));
+    }
+    let app = ove_web::cors::protect(api::router(st.clone()).merge(api::ui_router()), allowed);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr)
