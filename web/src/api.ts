@@ -40,6 +40,14 @@ export function apiPath(path: string): string {
   return serverBase + path;
 }
 
+/// Every JSON call is bounded — an unreachable server must surface as an
+/// error in seconds, never as an eternal spinner (v0.1.1 responsiveness).
+const API_TIMEOUT_MS = 15_000;
+
+async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(apiPath(path), { ...init, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+}
+
 /// Persist a new server base ("" = same-origin) and return to the bare page
 /// path so a stale `?server=` query param cannot override the saved value on
 /// the next load.
@@ -143,7 +151,7 @@ export async function getVersion(): Promise<{
   data_root: string;
   engine_busy: boolean;
 }> {
-  const r = await fetch(apiPath("/api/version"));
+  const r = await apiFetch("/api/version");
   return unwrap(r);
 }
 
@@ -158,7 +166,7 @@ export interface SettingsInfo {
 }
 
 export async function getSettings(): Promise<SettingsInfo> {
-  const r = await fetch(apiPath("/api/settings"));
+  const r = await apiFetch("/api/settings");
   return unwrap(r);
 }
 
@@ -170,12 +178,12 @@ export interface ProjectEntry {
 }
 
 export async function listProjects(): Promise<{ ok: true; projects: ProjectEntry[] }> {
-  const r = await fetch(apiPath("/api/projects"));
+  const r = await apiFetch("/api/projects");
   return unwrap(r);
 }
 
 export async function createProject(name: string): Promise<Shape> {
-  const r = await fetch(apiPath("/api/projects/create"), {
+  const r = await apiFetch("/api/projects/create", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, tick: [48000, 1] }),
@@ -184,7 +192,7 @@ export async function createProject(name: string): Promise<Shape> {
 }
 
 export async function openProject(name: string): Promise<Shape> {
-  const r = await fetch(apiPath("/api/projects/open"), {
+  const r = await apiFetch("/api/projects/open", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name }),
@@ -193,12 +201,12 @@ export async function openProject(name: string): Promise<Shape> {
 }
 
 export async function closeProject(): Promise<{ ok: true; closed: boolean }> {
-  const r = await fetch(apiPath("/api/projects/close"), { method: "POST" });
+  const r = await apiFetch("/api/projects/close", { method: "POST" });
   return unwrap(r);
 }
 
 export async function deleteProject(name: string): Promise<{ ok: true; deleted: string }> {
-  const r = await fetch(apiPath("/api/projects/delete"), {
+  const r = await apiFetch("/api/projects/delete", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name }),
@@ -240,7 +248,7 @@ export function importMedia(
 }
 
 export async function addTrack(id: number): Promise<Shape> {
-  const r = await fetch(apiPath("/api/track/add"), {
+  const r = await apiFetch("/api/track/add", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ id }),
@@ -251,12 +259,12 @@ export async function addTrack(id: number): Promise<Shape> {
 /// Current UI projection of the live document (engine-authoritative via
 /// state_hash — the client verifies after every mutation batch).
 export async function getShape(): Promise<Shape> {
-  const r = await fetch(apiPath("/api/shape"));
+  const r = await apiFetch("/api/shape");
   return unwrap(r);
 }
 
 export async function addClip(track: number, hash: string, duration: Rat, source_in: Rat): Promise<Shape> {
-  const r = await fetch(apiPath("/api/clip/add"), {
+  const r = await apiFetch("/api/clip/add", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ track, hash, duration, source_in }),
@@ -265,7 +273,7 @@ export async function addClip(track: number, hash: string, duration: Rat, source
 }
 
 export async function splitClip(track: number, clip: number, at: Rat): Promise<Shape> {
-  const r = await fetch(apiPath("/api/clip/split"), {
+  const r = await apiFetch("/api/clip/split", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ track, clip, at }),
@@ -274,7 +282,7 @@ export async function splitClip(track: number, clip: number, at: Rat): Promise<S
 }
 
 export async function resizeClip(track: number, clip: number, duration: Rat): Promise<Shape> {
-  const r = await fetch(apiPath("/api/clip/resize"), {
+  const r = await apiFetch("/api/clip/resize", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ track, clip, duration }),
@@ -283,7 +291,7 @@ export async function resizeClip(track: number, clip: number, duration: Rat): Pr
 }
 
 export async function moveClip(clip: number, from: number, to: number, index: number): Promise<Shape> {
-  const r = await fetch(apiPath("/api/clip/move"), {
+  const r = await apiFetch("/api/clip/move", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ clip, from, to, index }),
@@ -292,7 +300,7 @@ export async function moveClip(clip: number, from: number, to: number, index: nu
 }
 
 export async function removeClip(track: number, clip: number): Promise<Shape> {
-  const r = await fetch(apiPath("/api/clip/remove"), {
+  const r = await apiFetch("/api/clip/remove", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ track, clip }),
@@ -301,12 +309,12 @@ export async function removeClip(track: number, clip: number): Promise<Shape> {
 }
 
 export async function undo(): Promise<Shape> {
-  const r = await fetch(apiPath("/api/undo"), { method: "POST" });
+  const r = await apiFetch("/api/undo", { method: "POST" });
   return unwrap(r);
 }
 
 export async function redo(): Promise<Shape> {
-  const r = await fetch(apiPath("/api/redo"), { method: "POST" });
+  const r = await apiFetch("/api/redo", { method: "POST" });
   return unwrap(r);
 }
 
@@ -326,7 +334,7 @@ export type ExportStatus =
   | { ok: false; running: false; kind: string; message: string };
 
 export async function startCompositeExport(rate: Rat): Promise<ExportStart> {
-  const r = await fetch(apiPath("/api/export/reencode"), {
+  const r = await apiFetch("/api/export/reencode", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ rate }),
@@ -335,7 +343,7 @@ export async function startCompositeExport(rate: Rat): Promise<ExportStart> {
 }
 
 export async function startSegmentExport(hash: string, start: Rat, end: Rat): Promise<ExportStart> {
-  const r = await fetch(apiPath("/api/export/copy"), {
+  const r = await apiFetch("/api/export/copy", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ hash, start, end }),
@@ -344,11 +352,11 @@ export async function startSegmentExport(hash: string, start: Rat, end: Rat): Pr
 }
 
 export async function startWavExport(): Promise<ExportStart> {
-  const r = await fetch(apiPath("/api/export/wav"), { method: "POST" });
+  const r = await apiFetch("/api/export/wav", { method: "POST" });
   return unwrap(r);
 }
 
 export async function exportStatus(): Promise<ExportStatus> {
-  const r = await fetch(apiPath("/api/export/status"));
+  const r = await apiFetch("/api/export/status");
   return r.json();
 }

@@ -145,7 +145,7 @@ async fn journey_mpeg4_fixture() {
     // 0. version surface
     let v = get_json(&base, "/api/version").await;
     assert_eq!(v["engine_pin"], json!(ENGINE_PIN));
-    assert_eq!(v["server"], json!("0.1.1"));
+    assert_eq!(v["server"], json!("0.1.2"));
 
     // 1. create project (tick axis 48000/1 — audio-rate ticks)
     let v = assert_ok(

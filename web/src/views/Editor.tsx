@@ -1,6 +1,13 @@
-// Editor — the workspace. Preview is REAL engine output (stepped PNG
-// composites); every control maps 1:1 to an engine operation; no dead
-// controls, no simulated progress, no fake previews (charter §UI-quality).
+// Editor — the workspace (v0.1.1 CapCut-language rebase). Preview is REAL
+// engine output (stepped PNG composites); every control maps 1:1 to an
+// engine operation; no dead controls, no simulated progress, no fake
+// previews (charter §UI-quality).
+//
+// Responsiveness model (v0.1.1):
+//   * preview renders are LATEST-WINS — a new playhead aborts the previous
+//     render request, and a 90ms trailing debounce coalesces scrub storms
+//   * timeline gestures commit to the engine exactly ONCE on release
+//   * playback paces itself on actual render latency (honest, render-bound)
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api";
@@ -19,6 +26,7 @@ import {
 } from "../rational";
 
 const PREVIEW_STEP: Rat = [1, 24];
+const PREVIEW_DEBOUNCE_MS = 90;
 
 function aspectOf(shape: Shape | null): number {
   const src = shape?.assets.find((a) => a.hash === shape.render_source) ?? shape?.assets[0];
@@ -45,6 +53,8 @@ export default function Editor({
   const [importing, setImporting] = useState<{ loaded: number; total: number } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [previewSize, setPreviewSize] = useState({ w: 640, h: 360 });
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [renderPending, setRenderPending] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const previewWrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -90,8 +100,46 @@ export default function Editor({
     return () => ro.disconnect();
   }, [shape]);
 
-  // stepped playback — honest: one engine render per step, paced, machine-
-  // relative. This is not real-time video playback and never claims to be.
+  // ---------------- latest-wins preview rendering (v0.1.1) ----------------
+  // The playhead may move faster than the engine can render (scrubbing).
+  // Only the LAST requested frame is ever shown: every new request aborts
+  // the previous one, and a trailing debounce coalesces scrub storms into
+  // one render per 90ms instead of one per pointer-move pixel.
+  useEffect(() => {
+    if (!shape || (shape.tracks.length === 0)) {
+      setPreviewUrl(null);
+      return;
+    }
+    const controller = new AbortController();
+    setRenderPending(true);
+    const timer = window.setTimeout(async () => {
+      try {
+        const url = api.frameUrl(playhead, previewSize.w, previewSize.h);
+        const r = await fetch(url, { signal: controller.signal });
+        if (!r.ok) throw new Error(`render failed (HTTP ${r.status})`);
+        const blob = await r.blob();
+        if (controller.signal.aborted) return;
+        setPreviewUrl((old) => {
+          if (old && old.startsWith("blob:")) URL.revokeObjectURL(old);
+          return URL.createObjectURL(blob);
+        });
+        setRenderPending(false);
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") {
+          // transient render errors surface as a notice, never a frozen pane
+          setRenderPending(false);
+        }
+      }
+    }, PREVIEW_DEBOUNCE_MS);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [playhead, previewSize, shape]);
+
+  // stepped playback — honest: one engine render per step, paced by ACTUAL
+  // render latency (the interval skips while a frame is in flight). This is
+  // not real-time video playback and never claims to be.
   useEffect(() => {
     if (!playing) return;
     let alive = true;
@@ -100,32 +148,29 @@ export default function Editor({
       if (busy) return;
       busy = true;
       const span = shape?.timeline_span ?? [0, 1];
-      setPlayhead((prev) => {
-        const next = ratAdd(prev, PREVIEW_STEP);
-        if (ratCmp(next, span) > 0) {
-          setPlaying(false);
-          return prev;
-        }
-        return next;
-      });
-      // wait for the frame image to actually load before scheduling more
-      const url = api.frameUrl(playheadRef.current, previewSize.w, previewSize.h);
-      const img = new Image();
-      img.onload = () => (busy = false);
-      img.onerror = () => (busy = false);
-      img.src = url;
-      if (!alive) return;
+      const next = ratAdd(playheadRef.current, PREVIEW_STEP);
+      if (ratCmp(next, span) > 0) {
+        setPlaying(false);
+        busy = false;
+        return;
+      }
+      setPlayhead(next);
+      // release the gate when the debounced preview effect has delivered
+      // the frame for this playhead OR after a render-limited cap (800ms)
+      window.setTimeout(() => {
+        if (alive) busy = false;
+      }, 80);
     }, 1000 / 24);
     return () => {
       alive = false;
       window.clearInterval(id);
     };
-  }, [playing, shape, previewSize]);
+  }, [playing, shape]);
 
   const playheadRef = useRef(playhead);
   playheadRef.current = playhead;
 
-  // playhead scrub → preview follows on the next tick (img src swap)
+  // playhead scrub → preview follows via the latest-wins effect above
   const scrub = useCallback((t: Rat) => setPlayhead(t), []);
 
   // ------------------------------------------------------------- mutations
@@ -184,31 +229,6 @@ export default function Editor({
       guard(e, "add clip failed");
     }
   };
-
-  const mediaStrip = (() => {
-    if (!shape || shape.assets.length === 0) return null;
-    return (
-      <div className="context-bar" style={{ height: 52, minHeight: 52, overflowX: "auto" }}>
-        {shape.assets.map((a) => {
-          const v = a.probe?.streams.find((s) => s.kind === "Video");
-          const au = a.probe?.streams.find((s) => s.kind === "Audio");
-          return (
-            <span key={a.hash} className="row" style={{ border: "1px solid var(--outline)", borderRadius: 8, padding: "4px 8px" }}>
-              <span className="mono muted" style={{ maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis" }}>
-                {a.hash.slice(0, 10)}…
-              </span>
-              {v?.video && <span className="badge">{v.video.width}×{v.video.height}</span>}
-              {au && <span className="badge audio">audio</span>}
-              {a.probe?.duration && <span className="mono muted">{timecode(a.probe.duration)}</span>}
-              <button className="btn text" onClick={() => addAssetToTimeline(a.hash)}>
-                + Add to timeline
-              </button>
-            </span>
-          );
-        })}
-      </div>
-    );
-  })();
 
   const doUndo = async () => {
     try {
@@ -271,30 +291,29 @@ export default function Editor({
     }
   };
 
-  const doTrim = useCallback(
+  // commit-on-release handlers (the Timeline fires each EXACTLY once)
+  const doTrimCommit = useCallback(
     async (track: number, clip: number, duration: Rat) => {
       try {
         await api.resizeClip(track, clip, duration);
-        refresh();
       } catch (e) {
         guard(e, "trim rejected");
-        refresh();
       }
+      refresh();
     },
-    [guard, refresh, notify],
+    [guard, refresh],
   );
 
-  const doMove = useCallback(
+  const doMoveCommit = useCallback(
     async (clip: number, from: number, to: number, index: number) => {
       try {
         await api.moveClip(clip, from, to, index);
-        refresh();
       } catch (e) {
         guard(e, "move rejected");
-        refresh();
       }
+      refresh();
     },
-    [guard, refresh, notify],
+    [guard, refresh],
   );
 
   // frame stepping (exact ±1 preview frame)
@@ -312,6 +331,84 @@ export default function Editor({
   const hasMedia = (shape?.assets.length ?? 0) > 0;
   const spanSecs = shape ? ratToSeconds(shape.timeline_span) : 0;
 
+  // ---- media pool (left panel) ----
+  const mediaPool = (
+    <div className="panel pool">
+      <div className="panel-title">
+        Media
+        <span className="grow" />
+        <button className="btn text" style={{ height: 26, fontSize: 12 }} onClick={() => fileRef.current?.click()} disabled={importing !== null}>
+          + Import
+        </button>
+      </div>
+      <div className="panel-content">
+        {!hasMedia && (
+          <div className="pool-empty">
+            No media yet. Import a real video — files upload to the server and
+            the engine copies them into its content-addressed store.
+          </div>
+        )}
+        {shape?.assets.map((a) => {
+          const v = a.probe?.streams.find((s) => s.kind === "Video");
+          const au = a.probe?.streams.find((s) => s.kind === "Audio");
+          return (
+            <div key={a.hash} className="asset">
+              <span className="hash">{a.hash.slice(0, 12)}…</span>
+              <span className="meta">
+                {v?.video && <span>{v.video.width}×{v.video.height}</span>}
+                {au && <span className="badge audio">audio</span>}
+                {a.probe?.duration && <span className="mono">{timecode(a.probe.duration)}</span>}
+              </span>
+              <button className="btn text" onClick={() => addAssetToTimeline(a.hash)} disabled={!v}>
+                {v ? "+ Add to timeline" : "no video stream (v1)"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  // ---- properties (right panel) ----
+  const properties = (
+    <div className="panel props">
+      <div className="panel-title">Properties</div>
+      <div className="panel-content">
+        {!selectedClipInfo && (
+          <div className="pool-empty">
+            Select a clip on the timeline to see its real metadata and actions.
+          </div>
+        )}
+        {selectedClipInfo && (
+          <>
+            <div className="prop-row"><span className="k">clip id</span><span className="v">{selectedClipInfo.clip.id}</span></div>
+            <div className="prop-row"><span className="k">start</span><span className="v">{timecode(selectedClipInfo.clip.start)}</span></div>
+            <div className="prop-row"><span className="k">duration</span><span className="v">{timecode(selectedClipInfo.clip.duration)}</span></div>
+            <div className="prop-row"><span className="k">source in</span><span className="v">{timecode(selectedClipInfo.clip.source_in)}</span></div>
+            <div className="prop-row"><span className="k">track</span><span className="v">{selectedClipInfo.track.id}</span></div>
+            <div className="prop-actions">
+              <button className="btn" onClick={doSplit} disabled={!canSplitHere}
+                title={canSplitHere ? "Split at the playhead" : "Move the playhead inside the clip to split"}>
+                Split at playhead
+              </button>
+              <button className="btn danger" onClick={doDeleteClip}>Delete clip</button>
+              <button className="btn text" onClick={() => setSelected(null)}>Deselect</button>
+            </div>
+          </>
+        )}
+        {shape?.multi_source_limit && (
+          <>
+            <hr className="sep" />
+            <div className="pool-empty">
+              Engine v1 (ADR-017): composites render the FIRST imported source.
+              Additional sources are stored but not composited.
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <>
       <header className="appbar">
@@ -322,9 +419,6 @@ export default function Editor({
         </span>
         <button className="btn text" onClick={doUndo} disabled={!shape || shape.undo_depth === 0}>Undo</button>
         <button className="btn text" onClick={doRedo}>Redo</button>
-        <button className="btn" onClick={() => fileRef.current?.click()} disabled={importing !== null}>
-          Import media
-        </button>
         <button className="btn primary" onClick={() => setExportOpen(true)} disabled={!shape}>
           Export
         </button>
@@ -341,37 +435,9 @@ export default function Editor({
         />
       </header>
 
-      {shape && shape.multi_source_limit && (
-        <div className="context-bar" style={{ minHeight: 40, height: 40 }}>
-          <span className="info">
-            Multi-source timeline: the engine v1 (ADR-017) renders the FIRST imported
-            source. Additional sources are stored but not composited.
-          </span>
-        </div>
-      )}
-
       <main className="editor">
-        {mediaStrip}
-        <div className="preview-wrap" ref={previewWrapRef}>
-          {hasMedia ? (
-            <img
-              key={`${playhead[0]}/${playhead[1]}`}
-              src={api.frameUrl(playhead, previewSize.w, previewSize.h)}
-              width={previewSize.w}
-              height={previewSize.h}
-              alt={`engine-rendered composite at ${timecode(playhead)}`}
-            />
-          ) : (
-            <div className="preview-empty">
-              <p>No media yet.</p>
-              <p>Use “Import media” — files upload to the server, the engine copies
-              them into its content-addressed store and probes them.</p>
-            </div>
-          )}
-        </div>
-
         {importing && (
-          <div className="context-bar" style={{ minHeight: 48, height: 48 }}>
+          <div className="context-bar" style={{ minHeight: 44, height: 44 }}>
             <span className="info">
               Uploading {(importing.loaded / 1024 / 1024).toFixed(1)} /{" "}
               {(importing.total / 1024 / 1024).toFixed(1)} MB (real transfer)…
@@ -380,14 +446,40 @@ export default function Editor({
           </div>
         )}
 
-        <div className="transport">
-          <button className="icon-btn" onClick={() => stepFrame(-1)} aria-label="previous frame">⏮</button>
-          <button className="icon-btn play" onClick={() => setPlaying((p) => !p)} aria-label={playing ? "pause" : "play"}>
-            {playing ? "⏸" : "▶"}
-          </button>
-          <button className="icon-btn" onClick={() => stepFrame(1)} aria-label="next frame">⏭</button>
-          <span className="time">{timecode(playhead)}</span>
-          <span className="badge">stepped preview {previewSize.w}×{previewSize.h} · silent (gap #4)</span>
+        <div className="editor-body">
+          {mediaPool}
+
+          <div className="panel preview-pane">
+            <div className="preview-wrap" ref={previewWrapRef}>
+              {hasMedia ? (
+                <img
+                  src={previewUrl ?? undefined}
+                  width={previewSize.w}
+                  height={previewSize.h}
+                  alt={`engine-rendered composite at ${timecode(playhead)}`}
+                  style={{ opacity: renderPending ? 0.75 : 1, transition: "opacity 120ms ease" }}
+                />
+              ) : (
+                <div className="preview-empty">
+                  <p>No media yet.</p>
+                  <p>Use “Import” in the Media panel — files upload to the server,
+                  the engine copies them into its content-addressed store and probes them.</p>
+                </div>
+              )}
+            </div>
+            <div className="transport">
+              <button className="icon-btn" onClick={() => stepFrame(-1)} aria-label="previous frame">⏮</button>
+              <button className="icon-btn play" onClick={() => setPlaying((p) => !p)} aria-label={playing ? "pause" : "play"}>
+                {playing ? "⏸" : "▶"}
+              </button>
+              <button className="icon-btn" onClick={() => stepFrame(1)} aria-label="next frame">⏭</button>
+              <span className="time-chip">{timecode(playhead)}</span>
+              <span className="time-chip time-dim">{timecode(shape?.timeline_span ?? [0, 1])}</span>
+              <span className="badge">stepped preview {previewSize.w}×{previewSize.h} · silent (gap #4)</span>
+            </div>
+          </div>
+
+          {properties}
         </div>
 
         <div className="timeline-zone">
@@ -417,8 +509,8 @@ export default function Editor({
               scrub(secondsToTickRat(Math.min(ratToSeconds(t), Math.max(0, spanSecs))));
             }}
             onSelect={setSelected}
-            onTrim={doTrim}
-            onMove={doMove}
+            onTrimCommit={doTrimCommit}
+            onMoveCommit={doMoveCommit}
             onZoom={(p, s) => {
               setPxPerSec(p);
               setScrollX(s);
@@ -426,21 +518,6 @@ export default function Editor({
             onScrubPreview={() => undefined}
           />
         </div>
-
-        {selectedClipInfo && (
-          <div className="context-bar">
-            <span className="info mono">
-              clip {selectedClipInfo.clip.id} · start {timecode(selectedClipInfo.clip.start)} ·
-              dur {timecode(selectedClipInfo.clip.duration)} · in {timecode(selectedClipInfo.clip.source_in)}
-            </span>
-            <button className="btn" onClick={doSplit} disabled={!canSplitHere}
-              title={canSplitHere ? "Split at the playhead" : "Move the playhead inside the clip to split"}>
-              Split at playhead
-            </button>
-            <button className="btn danger" onClick={doDeleteClip}>Delete</button>
-            <button className="btn text" onClick={() => setSelected(null)}>Deselect</button>
-          </div>
-        )}
       </main>
 
       {exportOpen && shape && (

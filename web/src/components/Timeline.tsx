@@ -1,6 +1,11 @@
 // Canvas timeline — ruler / tracks / clips / selection / trim handles /
-// playhead / zoom. All geometry uses float seconds for PIXELS ONLY; every
-// value sent back to the engine is exact-rational (see rational.ts).
+// playhead / zoom / move ghost. All geometry uses float seconds for PIXELS
+// ONLY; every value sent back to the engine is exact-rational (rational.ts).
+//
+// v0.1.1 responsiveness rework: gestures keep ALL interaction state local
+// (trim preview, move ghost) and commit to the engine exactly ONCE on
+// release — v0.1.0 fired a network mutation on every pointermove, which
+// flooded the single-writer session and froze the UI.
 
 import { useEffect, useRef } from "react";
 import type { Clip, Track } from "../api";
@@ -15,15 +20,19 @@ export interface TimelineProps {
   scrollX: number;
   onScrub: (t: Rat) => void;
   onSelect: (sel: { track: number; clip: number } | null) => void;
-  onTrim: (track: number, clip: number, duration: Rat) => void;
-  onMove: (clip: number, from: number, to: number, index: number) => void;
+  /** fired ONCE per gesture, on release — engine resize with exact rational */
+  onTrimCommit: (track: number, clip: number, duration: Rat) => void;
+  /** fired ONCE per gesture, on release — engine move (post-state index) */
+  onMoveCommit: (clip: number, from: number, to: number, index: number) => void;
   onZoom: (pxPerSec: number, scrollX: number) => void;
   onScrubPreview: () => void;
 }
 
 const RULER_H = 24;
-const TRACK_PITCH = 48;
-const HANDLE_W = 7;
+const TRACK_PITCH = 56;
+const HANDLE_W = 8;          // visual handle width (px)
+const HANDLE_HIT = 14;       // half-width of the touch zone around an edge
+const SNAP_PX = 10;          // edge-snap threshold
 
 function drawRulerStep(pxPerSec: number): number {
   const candidates = [1 / 24, 1 / 8, 1 / 4, 1 / 2, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
@@ -46,20 +55,21 @@ function fmtRuler(t: number, step: number): string {
   return `${m}:${(s - m * 60).toString().padStart(2, "0")}.${ff.toString().padStart(2, "0")}f`;
 }
 
+type Drag =
+  | { kind: "pan"; startX: number; startScroll: number }
+  | { kind: "scrub" }
+  | { kind: "trimL" | "trimR"; track: number; clip: Clip }
+  | { kind: "move"; clip: Clip; from: number; grabOffsetX: number; grabOffsetY: number };
+
 export default function Timeline(props: TimelineProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const stateRef = useRef(props);
   stateRef.current = props;
-
-  // keep a mutable interaction state in refs (pointer drags)
-  const dragRef = useRef<
-    | null
-    | { kind: "pan"; startX: number; startScroll: number }
-    | { kind: "scrub" }
-    | { kind: "trimL" | "trimR"; track: number; clip: Clip }
-    | { kind: "move"; clipId: number; from: number; grabOffset: number; moved: boolean }
-  >(null);
+  const dragRef = useRef<Drag | null>(null);
+  // LOCAL gesture visuals (never sent anywhere; committed once on release)
+  const trimPreviewRef = useRef<{ clipId: number; durationSec: number } | null>(null);
+  const moveGhostRef = useRef<{ trackIndex: number; x: number; w: number; y: number } | null>(null);
 
   // ------------------------------------------------------------------ draw
   useEffect(() => {
@@ -87,15 +97,15 @@ export default function Timeline(props: TimelineProps) {
       const t2x = (t: Rat | number) => (typeof t === "number" ? t : ratToSeconds(t)) * px - sx;
 
       // background lanes
-      ctx.fillStyle = col("--surface-container");
+      ctx.fillStyle = col("--background");
       ctx.fillRect(0, RULER_H, w, h - RULER_H);
 
       // ruler
-      ctx.fillStyle = col("--surface-variant");
+      ctx.fillStyle = col("--surface");
       ctx.fillRect(0, 0, w, RULER_H);
       const step = drawRulerStep(px);
       const first = Math.floor(sx / px / step) * step;
-      ctx.font = "11px " + col("--font");
+      ctx.font = "10px " + col("--font");
       ctx.textBaseline = "middle";
       for (let t = first; t * px - sx < w + 1; t += step) {
         const x = t * px - sx;
@@ -119,41 +129,52 @@ export default function Timeline(props: TimelineProps) {
 
         for (const clip of track.clips) {
           const x = t2x(clip.start);
-          const cw = Math.max(2, ratToSeconds(clip.duration) * px);
+          const preview = trimPreviewRef.current;
+          const durSec =
+            preview && preview.clipId === clip.id
+              ? preview.durationSec
+              : ratToSeconds(clip.duration);
+          const cw = Math.max(2, durSec * px);
           if (x + cw < 0 || x > w) continue;
           const isSel = sel?.track === track.id && sel?.clip === clip.id;
           ctx.fillStyle = col("--clip-video");
-          roundRect(ctx, x + 1, y + 5, cw - 2, TRACK_PITCH - 14, 6);
+          roundRect(ctx, x + 1, y + 5, cw - 2, TRACK_PITCH - 14, 4);
           ctx.fill();
           if (isSel) {
+            // selection ring — 1.5px primary (OpenCut convention)
             ctx.strokeStyle = col("--primary");
-            ctx.lineWidth = 2;
-            roundRect(ctx, x + 1, y + 5, cw - 2, TRACK_PITCH - 14, 6);
+            ctx.lineWidth = 1.5;
+            roundRect(ctx, x + 1, y + 5, cw - 2, TRACK_PITCH - 14, 4);
             ctx.stroke();
-            // trim handles
+            // trim handles — visual 8px (touch zone is wider, see hit test)
             ctx.fillStyle = col("--primary");
             ctx.fillRect(x + 1, y + 5, HANDLE_W, TRACK_PITCH - 14);
             ctx.fillRect(x + cw - 1 - HANDLE_W, y + 5, HANDLE_W, TRACK_PITCH - 14);
           }
           // label (real metadata: clip id + exact duration — gap #7: no
           // thumbnails or waveforms at client surfaces)
-          ctx.fillStyle = "#ffffff";
+          ctx.fillStyle = "#DEDEDE";
           ctx.font = "11px " + col("--font");
           const label = `clip ${clip.id} · ${timecode(clip.duration)}`;
           if (cw > 60) ctx.fillText(label, x + 10 + (isSel ? HANDLE_W : 0), y + 14, cw - 24);
         }
       });
 
-      // playhead (error color — editor convention, UI_SYSTEM §1)
+      // move ghost (live drop preview)
+      const ghost = moveGhostRef.current;
+      if (ghost) {
+        ctx.fillStyle = col("--primary-dim") || "rgba(22,169,243,0.4)";
+        roundRect(ctx, ghost.x, RULER_H + ghost.trackIndex * TRACK_PITCH + 5, ghost.w, TRACK_PITCH - 14, 4);
+        ctx.fill();
+      }
+
+      // playhead (primary accent — CapCut/OpenCut convention)
       const pxh = t2x(stateRef.current.playhead);
       if (pxh >= -1 && pxh <= w + 1) {
-        ctx.fillStyle = col("--error");
+        ctx.fillStyle = col("--primary");
         ctx.fillRect(pxh, 0, 2, h);
         ctx.beginPath();
-        ctx.moveTo(pxh - 5, 0);
-        ctx.lineTo(pxh + 7, 0);
-        ctx.lineTo(pxh + 1, 8);
-        ctx.closePath();
+        ctx.arc(pxh + 1, 7, 5, 0, Math.PI * 2);
         ctx.fill();
       }
     };
@@ -198,6 +219,35 @@ export default function Timeline(props: TimelineProps) {
     return null;
   };
 
+  /** index within a track for a drop x (post-state semantics, excluding id) */
+  const insertionIndex = (track: Track, dropSec: number, excludeId: number): number => {
+    let idx = 0;
+    for (const c of track.clips) {
+      if (c.id !== excludeId && ratToSeconds(c.start) < dropSec) idx++;
+    }
+    return idx;
+  };
+
+  /** snap drop seconds to nearby clip edges (visual stabilization only) */
+  const snapDrop = (dropSec: number): number => {
+    const px = stateRef.current.pxPerSec;
+    const tracks = stateRef.current.tracks;
+    let best = dropSec;
+    let bestDist = SNAP_PX / px;
+    for (const tr of tracks) {
+      for (const c of tr.clips) {
+        for (const edge of [ratToSeconds(c.start), ratToSeconds(c.start) + ratToSeconds(c.duration)]) {
+          const d = Math.abs(edge - dropSec);
+          if (d < bestDist) {
+            bestDist = d;
+            best = edge;
+          }
+        }
+      }
+    }
+    return best;
+  };
+
   const onPointerDown = (e: React.PointerEvent) => {
     const rect = canvasRef.current!.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -222,16 +272,22 @@ export default function Timeline(props: TimelineProps) {
     props.onSelect({ track: hit.track.id, clip: hit.clip.id });
     const isSel = sel?.track === hit.track.id && sel?.clip === hit.clip.id;
     if (isSel) {
-      if (x <= hit.cx + HANDLE_W) {
+      if (x <= hit.cx + HANDLE_HIT) {
         dragRef.current = { kind: "trimL", track: hit.track.id, clip: hit.clip };
         return;
       }
-      if (x >= hit.cx + hit.cw - HANDLE_W) {
+      if (x >= hit.cx + hit.cw - HANDLE_HIT) {
         dragRef.current = { kind: "trimR", track: hit.track.id, clip: hit.clip };
         return;
       }
     }
-    dragRef.current = { kind: "move", clipId: hit.clip.id, from: hit.track.id, grabOffset: x - hit.cx, moved: false };
+    dragRef.current = {
+      kind: "move",
+      clip: hit.clip,
+      from: hit.track.id,
+      grabOffsetX: x - hit.cx,
+      grabOffsetY: y,
+    };
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -248,44 +304,63 @@ export default function Timeline(props: TimelineProps) {
       const { t } = timeAt(e.clientX);
       const clipStart = drag.clip.start;
       if (drag.kind === "trimR") {
-        // right edge: new duration = t - start (min one tick)
         const d = secondsToTickRat(Math.max(1 / 48000, ratToSeconds(t) - ratToSeconds(clipStart)));
-        props.onTrim(drag.track, drag.clip.id, d);
+        trimPreviewRef.current = { clipId: drag.clip.id, durationSec: ratToSeconds(d) };
       } else {
-        // left edge: engine v1 resizes DURATION (start stays; source_in shifts
-        // are move+resize compositions) — left trim adjusts duration only when
-        // the pointer stays right of the clip start; otherwise clamp to one tick.
-        const d = secondsToTickRat(Math.max(1 / 48000, ratToSeconds(drag.clip.start) + ratToSeconds(drag.clip.duration) - Math.max(ratToSeconds(clipStart), ratToSeconds(t))));
-        props.onTrim(drag.track, drag.clip.id, d);
+        const d = secondsToTickRat(
+          Math.max(
+            1 / 48000,
+            ratToSeconds(drag.clip.start) + ratToSeconds(drag.clip.duration) -
+              Math.max(ratToSeconds(clipStart), ratToSeconds(t)),
+          ),
+        );
+        trimPreviewRef.current = { clipId: drag.clip.id, durationSec: ratToSeconds(d) };
       }
     } else if (drag.kind === "move") {
-      drag.moved = true;
-      // live feedback happens via hover highlight only; commit on pointerup
-    }
-  };
-
-  const onPointerUp = (e: React.PointerEvent) => {
-    const drag = dragRef.current;
-    dragRef.current = null;
-    if (!drag) return;
-    if (drag.kind === "move" && drag.moved) {
       const rect = canvasRef.current!.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       const px = stateRef.current.pxPerSec;
-      const sx = stateRef.current.scrollX;
       const tracks = stateRef.current.tracks;
-      const trackIndex = Math.max(0, Math.min(tracks.length - 1, Math.floor((y - RULER_H) / TRACK_PITCH)));
-      const target = tracks[trackIndex];
-      // insertion index (post-state semantics): clips before the drop time,
-      // excluding the dragged clip itself
-      const dropTime = (x + sx - drag.grabOffset) / px;
-      let index = 0;
-      for (const c of target.clips) {
-        if (c.id !== drag.clipId && ratToSeconds(c.start) < dropTime) index++;
-      }
-      props.onMove(drag.clipId, drag.from, target.id, index);
+      const trackIndex = Math.max(
+        0,
+        Math.min(tracks.length - 1, Math.floor((y - RULER_H) / TRACK_PITCH)),
+      );
+      const w = Math.max(2, ratToSeconds(drag.clip.duration) * px);
+      moveGhostRef.current = { trackIndex, x: x - drag.grabOffsetX, w, y };
     }
+  };
+
+  const onPointerUp = (_e: React.PointerEvent) => {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (!drag) return;
+    if (drag.kind === "trimL" || drag.kind === "trimR") {
+      const preview = trimPreviewRef.current;
+      trimPreviewRef.current = null;
+      if (preview) {
+        const d = secondsToTickRat(preview.durationSec);
+        props.onTrimCommit(drag.track, drag.clip.id, d);
+      }
+    } else if (drag.kind === "move") {
+      const ghost = moveGhostRef.current;
+      moveGhostRef.current = null;
+      if (!ghost) return;
+      const tracks = stateRef.current.tracks;
+      const target = tracks[ghost.trackIndex];
+      if (!target) return;
+      const px = stateRef.current.pxPerSec;
+      const sx = stateRef.current.scrollX;
+      const dropSec = snapDrop((ghost.x + drag.grabOffsetX + sx) / px);
+      const index = insertionIndex(target, dropSec, drag.clip.id);
+      props.onMoveCommit(drag.clip.id, drag.from, target.id, index);
+    }
+  };
+
+  const onPointerCancel = () => {
+    dragRef.current = null;
+    trimPreviewRef.current = null;
+    moveGhostRef.current = null;
   };
 
   const onWheel = (e: React.WheelEvent) => {
@@ -313,7 +388,7 @@ export default function Timeline(props: TimelineProps) {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={() => (dragRef.current = null)}
+        onPointerCancel={onPointerCancel}
         onWheel={onWheel}
       />
     </div>

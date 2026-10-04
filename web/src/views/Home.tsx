@@ -93,7 +93,11 @@ export default function Home({
       <header className="appbar">
         <span className="title">OVE Studio</span>
         <span className="subtitle">
-          {version ? `server ${version.server} · engine ${version.engine_version} @ ${version.engine_pin.slice(0, 12)}` : "connecting…"}
+          {version
+            ? `server ${version.server} · engine ${version.engine_version} @ ${version.engine_pin.slice(0, 12)}`
+            : serverOnline === false
+              ? "engine offline"
+              : "connecting…"}
         </span>
         <button className="btn text" onClick={onSettings}>Settings</button>
       </header>
@@ -136,44 +140,49 @@ export default function Home({
             </div>
           </div>
         )}
-        <div className="head">
-          <h1>Projects</h1>
-          <button
-            className="btn primary"
-            onClick={() => setCreating(true)}
-            disabled={busy}
-          >
-            New project
-          </button>
-        </div>
 
-        {projects === null && <div className="empty">Loading…</div>}
+        {projects === null && serverOnline !== false && <div className="empty">Loading…</div>}
 
-        {projects !== null && projects.length === 0 && (
+        {projects !== null && projects.length === 0 && serverOnline !== false && (
           <div className="empty">
             <p>No projects yet.</p>
             <p>Create one, then import real media in the editor.</p>
+            <button className="btn primary big-cta" onClick={() => setCreating(true)} disabled={busy}>
+              New project
+            </button>
           </div>
         )}
 
-        {projects?.map((p) => (
-          <div key={p.name} className={`card ${p.exists_on_disk ? "" : "missing"}`}>
-            <div className="meta">
+        {projects !== null && projects.length > 0 && (
+          <div className="head">
+            <h1>Projects</h1>
+            <button className="btn primary" onClick={() => setCreating(true)} disabled={busy}>
+              New project
+            </button>
+          </div>
+        )}
+
+        <div className="home-grid">
+          {projects?.map((p) => (
+            <div key={p.name} className={`pcard ${p.exists_on_disk ? "" : "missing"}`}>
+              <div className="poster">🎬</div>
               <div className="name">{p.name}</div>
               <div className="sub">
                 {p.exists_on_disk
                   ? `last opened ${fmtTime(p.last_opened)}`
                   : "folder missing on disk"}
               </div>
+              <div className="actions">
+                <button className="btn primary" disabled={busy || !p.exists_on_disk} onClick={() => doOpen(p)}>
+                  Open
+                </button>
+                <button className="btn danger text" disabled={busy} onClick={() => doDelete(p)}>
+                  Delete
+                </button>
+              </div>
             </div>
-            <button className="btn primary" disabled={busy || !p.exists_on_disk} onClick={() => doOpen(p)}>
-              Open
-            </button>
-            <button className="btn danger text" disabled={busy} onClick={() => doDelete(p)}>
-              Delete
-            </button>
-          </div>
-        ))}
+          ))}
+        </div>
       </main>
 
       {creating && (
